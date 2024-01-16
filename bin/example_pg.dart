@@ -10,7 +10,7 @@ import 'package:freetype_dart/src/generated_bindings.dart';
 void main(List<String> args) {
   var dl = DynamicLibrary.open(r'libpq\\bin\\libpq.dll');
   var pq = LibpqBindings(dl);
-  var conninfo = 'user=postgres password=dart host=127.0.0.1 dbname=postgres';
+  var conninfo = 'user=dart password=dart host=127.0.0.1 dbname=postgres port=5435';
   var conn = pq.PQconnectdb(conninfo.toNativeUtf8().cast());
   if (pq.PQstatus(conn) != ConnStatusType.CONNECTION_OK)
     print(pq.PQerrorMessage(conn));
@@ -19,7 +19,7 @@ void main(List<String> args) {
       conn, "SELECT * from pg_catalog.pg_user limit 1".toNativeUtf8().cast());
 
   if (pq.PQresultStatus(res) != ExecStatusType.PGRES_TUPLES_OK) {
-    print("SET failed: " + pq.PQerrorMessage(conn).toDartString());
+    print("failed: " + pq.PQerrorMessage(conn).toDartString());
     pq.PQclear(res);
     pq.PQfinish(conn);
   }

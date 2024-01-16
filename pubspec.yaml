@@ -1,11 +1,14 @@
 name: freetype_dart
+version: 1.0.0
+description: freetype dart bindings
+homepage: https://github.com/insinfo/libpq_dart
+repository: https://github.com/insinfo/libpq_dart
 
 environment:
   sdk: '>=3.2.0 <4.0.0'
 
 dependencies: 
   path: ^1.9.0
-  image: ^4.1.4
   ffi: ^2.1.0
   ffigen: ^11.0.0
 
