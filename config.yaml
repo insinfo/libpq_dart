@@ -1,0 +1,10 @@
+ffigen:
+  name: 'LibpqBindings'
+  llvm-path:  
+    - 'C:\llvm'
+  output: 'lib/src/generated_bindings.dart'
+  headers:
+    entry-points:            
+      - 'libpq\include\libpq-fe.h'        
+    include-directives:
+      - 'libpq\include\**'
