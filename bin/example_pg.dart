@@ -1,7 +1,7 @@
 import 'dart:ffi';
 import 'dart:io';
-import 'package:freetype_dart/src/extensions/extensions.dart';
-import 'package:freetype_dart/src/generated_bindings.dart';
+
+import 'package:libpq_dart/libpq_dart.dart';
 
 //C:\tools\sigcheck.exe C:\msys64\mingw64\bin\libpq.dll
 //dumpbin /dependents C:\msys64\mingw64\bin\libpq.dll
