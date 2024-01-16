@@ -5,14 +5,14 @@ homepage: https://github.com/insinfo/libpq_dart
 repository: https://github.com/insinfo/libpq_dart
 
 environment:
-  sdk: '>=3.2.0 <4.0.0'
+  sdk: '>=3.0.0 <4.0.0'
 
 dependencies: 
   path: ^1.9.0
-  ffi: ^2.1.0
-  ffigen: ^11.0.0
+  ffi: ^2.1.0  
 
-#dev_dependencies:
+dev_dependencies:
+  ffigen: ^11.0.0
 
 
 ffigen:
