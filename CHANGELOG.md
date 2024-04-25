@@ -2,6 +2,6 @@
 
 - Initial version
 
-## 1.2.0
+## 1.1.0
 
 - implemented a hi level libpq wrapper
