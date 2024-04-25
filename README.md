@@ -43,6 +43,26 @@ void main(List<String> args) {
 }
 
 ```
+##### example hi level
 
+```dart
+import 'package:libpq_dart/libpq_dart.dart';
 
+void main(List<String> args) {
+  final conninfo =
+      'user=dart password=dart host=127.0.0.1 dbname=banco_teste port=5435';
+  final pq = LibPq(conninfo);
+
+  final res =
+      pq.execParams(r'INSERT INTO public.knowledge (id, name, arquivo) values($1,$2);', ['1', 'Isaque']);
+
+  print('affectedRows: ${res.affectedRows}');
+
+  res.dispose();
+
+  // print(pq.execMapList('SELECT * from pg_catalog.pg_user limit 1'));
+  print('libpqVersion ${pq.libpqVersion}');
+
+  pq.dispose();
+}
 

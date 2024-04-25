@@ -4,13 +4,12 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
-
 /// Extension method for converting a [String] to a `Pointer<Utf8>`.
-extension StringUtf8Pointer on String {
+extension StringUtf8PointerCustom on String {
   /// Creates a zero-terminated [Utf8] code-unit array from this String.
   ///
   /// If this [String] contains NUL characters, converting it back to a string
-  /// using [Utf8Pointer.toDartString] will truncate the result if a length is
+  /// using [Utf8Pointer.asUtf8P] will truncate the result if a length is
   /// not passed.
   ///
   /// Unpaired surrogate code points in this [String] will be encoded as
@@ -18,8 +17,8 @@ extension StringUtf8Pointer on String {
   /// the UTF-8 encoded result. See [Utf8Encoder] for details on encoding.
   ///
   /// Returns an [allocator]-allocated pointer to the result.
-  Pointer<Utf8> toNativeUtf8({Allocator allocator = malloc}) {
-    final units = utf8.encode(this);
+  Pointer<Utf8> asUtf8P({Allocator allocator = malloc, Encoding? encoding}) {
+    final units = encoding != null ? encoding.encode(this) : utf8.encode(this);
     final Pointer<Uint8> result = allocator<Uint8>(units.length + 1);
     final Uint8List nativeString = result.asTypedList(units.length + 1);
     nativeString.setAll(0, units);
@@ -28,17 +27,19 @@ extension StringUtf8Pointer on String {
   }
 
   /// Returns *const char
-  Pointer<Int8> asInt8({Allocator allocator = malloc}) {
-    final units = utf8.encode(this);
+  Pointer<Int8> asInt8({Allocator allocator = malloc, Encoding? encoding}) {
+    final units = encoding != null ? encoding.encode(this) : utf8.encode(this);
     final Pointer<Uint8> result = allocator<Uint8>(units.length + 1);
     final Uint8List nativeString = result.asTypedList(units.length + 1);
     nativeString.setAll(0, units);
     nativeString[units.length] = 0;
     return result.cast();
   }
+
   /// Returns * char
-  Pointer<Char> asCharP({Allocator allocator = malloc}) {
-    final units = utf8.encode(this);
+  Pointer<Char> asCharP({Allocator allocator = malloc, Encoding? encoding}) {
+    final units = encoding != null ? encoding.encode(this) : utf8.encode(this);
+
     final Pointer<Uint8> result = allocator<Uint8>(units.length + 1);
     final Uint8List nativeString = result.asTypedList(units.length + 1);
     nativeString.setAll(0, units);
@@ -69,13 +70,16 @@ extension CharPointerExtension on Pointer<Char> {
   ///
   /// If [length] is not provided, the returned string is the string up til
   /// but not including  the first NUL character.
-  String toDartString({int? length}) {
+  String asDartString({int? length, Encoding? encoding}) {
     _ensureNotNullptr('toDartString');
     final codeUnits = cast<Uint8>();
     if (length != null) {
       RangeError.checkNotNegative(length, 'length');
     } else {
       length = _length(codeUnits);
+    }
+    if (encoding != null) {
+      return encoding.decode(codeUnits.asTypedList(length));
     }
     return utf8.decode(codeUnits.asTypedList(length), allowMalformed: true);
   }
@@ -95,13 +99,3 @@ extension CharPointerExtension on Pointer<Char> {
     }
   }
 }
-
-// extension FT_BitmapEx on FT_Bitmap {
-//   List<int> get bufferAsList {
-//     final pitch = this.pitch;
-//     final rows = this.rows;
-   
-//     final buffer = this.buffer.cast<Int8>().asTypedList((pitch * rows).toInt());
-//     return buffer;
-//   }
-// }

@@ -1,6 +1,7 @@
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:ffi/ffi.dart';
 import 'package:libpq_dart/libpq_dart.dart';
 
 //C:\tools\sigcheck.exe C:\msys64\mingw64\bin\libpq.dll
@@ -19,20 +20,20 @@ void main(List<String> args) {
       conn, "SELECT * from pg_catalog.pg_user limit 1".toNativeUtf8().cast());
 
   if (pq.PQresultStatus(res) != ExecStatusType.PGRES_TUPLES_OK) {
-    print("failed: " + pq.PQerrorMessage(conn).toDartString());
+    print("failed: " + pq.PQerrorMessage(conn).asDartString());
     pq.PQclear(res);
     pq.PQfinish(conn);
   }
 
   var nFields = pq.PQnfields(res);
   for (var i = 0; i < nFields; i++) {
-    stdout.write(" " + pq.PQfname(res, i).toDartString() + ' | ');
+    stdout.write(" " + pq.PQfname(res, i).asDartString() + ' | ');
   }
 
   for (var i = 0; i < pq.PQntuples(res); i++) {
     print(' ');
     for (var j = 0; j < nFields; j++) {
-      stdout.write(pq.PQgetvalue(res, i, j).toDartString() + ' | ');
+      stdout.write(pq.PQgetvalue(res, i, j).asDartString() + ' | ');
     }
     print(' ');
   }
