@@ -8,8 +8,28 @@ import 'package:libpq_dart/src/extensions/extensions.dart';
 import 'package:libpq_dart/src/generated_bindings.dart';
 import 'package:libpq_dart/src/pq.dart';
 
+import 'native_params.dart';
 import 'pq_exception.dart';
 
+/// Reads the error fields of a failed [result].
+LibPqException exceptionFromResult(LibpqBindings pq, Pointer<pg_result> result,
+    Encoding encoding, String? sql) {
+  String? field(int code) {
+    final value = pq.PQresultErrorField(result, code);
+    return value == nullptr ? null : value.asDartString(encoding: encoding);
+  }
+
+  return LibPqException(
+    pq.PQresultErrorMessage(result).asDartString(encoding: encoding).trim(),
+    sql: sql,
+    sqlState: field(PG_DIAG_SQLSTATE),
+    severity: field(PG_DIAG_SEVERITY_NONLOCALIZED) ?? field(PG_DIAG_SEVERITY),
+    detail: field(PG_DIAG_MESSAGE_DETAIL),
+    hint: field(PG_DIAG_MESSAGE_HINT),
+  );
+}
+
+/// The result of a query, in native memory until [dispose].
 class PqResult implements IDisposable {
   final LibPq psql;
   final String query;
@@ -24,30 +44,40 @@ class PqResult implements IDisposable {
 
   PqResult(this.psql, this.res, this.query) {
     if (res == nullptr) {
-      throw LibPqException("Result is nullptr");
+      // libpq returns null on out of memory or a lost connection.
+      throw LibPqException(
+          psql.lastErrorMessage.isEmpty
+              ? 'libpq returned no result'
+              : psql.lastErrorMessage.trim(),
+          sql: query);
     }
 
     _status = psql.pq.PQresultStatus(res);
     _valid = (_status == ExecStatusType.PGRES_COMMAND_OK ||
         _status == ExecStatusType.PGRES_TUPLES_OK);
+
+    if (!_valid) {
+      final error = exceptionFromResult(psql.pq, res, psql.encoding, query);
+      dispose();
+      throw error;
+    }
+
     _columns = psql.pq.PQnfields(res);
     _rows = psql.pq.PQntuples(res);
-
     for (int i = 0; i < _columns; i++) {
       columnNames
           .add(psql.pq.PQfname(res, i).asDartString(encoding: psql.encoding));
     }
+  }
 
-    if (_status != ExecStatusType.PGRES_COMMAND_OK &&
-        _status != ExecStatusType.PGRES_TUPLES_OK) {
-      final message = psql.pq
-          .PQresultErrorMessage(res)
-          .asDartString(encoding: psql.encoding);
-      dispose();
-      throw LibPqException(message, sql: query);
+  void _checkCell(int row, int column) {
+    if (res == nullptr) throw StateError('This result was disposed');
+    if (row < 0 || row >= _rows || column < 0 || column >= _columns) {
+      throw LibPqException("Row or column index out of range!");
     }
   }
 
+  /// The rows as maps of column name to text; SQL NULL is `null`.
   List<Map<String, dynamic>> asMapList() {
     final result = <Map<String, dynamic>>[];
     if (valid == false) {
@@ -60,16 +90,26 @@ class PqResult implements IDisposable {
     for (int r = 0; r < _rows; r++) {
       final map = <String, dynamic>{};
       for (int c = 0; c < _columns; c++) {
-        map[columnName(c)] = getValueAsString(r, c);
+        map[columnNames[c]] = getValue(r, c);
       }
       result.add(map);
     }
     return result;
   }
 
+  /// The rows affected by the command, or returned by a `SELECT`; 0 for a
+  /// command that has no such count (`CREATE TABLE`, `SET`...).
   int get affectedRows {
-    return int.parse(
-        psql.pq.PQcmdTuples(res).asDartString(encoding: psql.encoding));
+    if (res == nullptr) throw StateError('This result was disposed');
+    return int.tryParse(
+            psql.pq.PQcmdTuples(res).asDartString(encoding: psql.encoding)) ??
+        0;
+  }
+
+  /// The command tag (`INSERT 0 1`, `SELECT 3`...).
+  String get commandTag {
+    if (res == nullptr) throw StateError('This result was disposed');
+    return psql.pq.PQcmdStatus(res).asDartString(encoding: psql.encoding);
   }
 
   /// Returns true, if the result is empty
@@ -92,100 +132,99 @@ class PqResult implements IDisposable {
     return _rows;
   }
 
-  /// Access to the data
-  // dynamic operator [](int index){
-  // }
-  /// Access to the data
+  /// Whether the value is SQL NULL.
+  bool isNull(int row, int column) {
+    _checkCell(row, column);
+    return psql.pq.PQgetisnull(res, row, column) == 1;
+  }
+
+  /// The value as text; `null` for SQL NULL.
+  String? getValue(int row, int column, {Encoding? encoding}) =>
+      isNull(row, column)
+          ? null
+          : getValueAsString(row, column, encoding: encoding);
+
+  /// The value as text; an empty string for SQL NULL (see [getValue]).
   String getValueAsString(int row, int column,
       {int? length, Encoding? encoding}) {
-    if (row < 0 || row >= rows || column < 0 || column >= columns)
-      throw LibPqException("Row or column index out of range!");
-    final valuePoiter = psql.pq.PQgetvalue(res, row, column);
+    return (encoding ?? psql.encoding)
+        .decode(_nativeBytes(row, column, length));
+  }
 
-    int _length(Pointer<Uint8> codeUnits) {
-      var length = 0;
-      while (codeUnits[length] != 0) {
-        length++;
-      }
-      return length;
-    }
-
-    final codeUnits = valuePoiter.cast<Uint8>();
-    if (length != null) {
-      RangeError.checkNotNegative(length, 'length');
-    } else {
-      length = _length(codeUnits);
-    }
-    final bytes = codeUnits.asTypedList(length);
-
-    return encoding != null
-        ? encoding.decode(bytes)
-        : psql.encoding.decode(bytes);
+  /// A view of the value in native memory, valid only until [dispose].
+  Uint8List _nativeBytes(int row, int column, int? length) {
+    _checkCell(row, column);
+    if (length != null) RangeError.checkNotNegative(length, 'length');
+    return psql.pq
+        .PQgetvalue(res, row, column)
+        .cast<Uint8>()
+        .asTypedList(length ?? psql.pq.PQgetlength(res, row, column));
   }
 
   /// Access to the data
   String getValueByColNameAsString(int row, String column,
       {int? length, Encoding? encoding}) {
     if (row < 0 || row >= rows) throw LibPqException("Row index out of range!");
-    for (int i = 0; i < columns; i++) {
-      if (columnNames[i] == column)
-        return getValueAsString(row, i, length: length, encoding: encoding);
-    }
-    throw LibPqException("Column $column not found!");
+    return getValueAsString(row, columnIndex(column),
+        length: length, encoding: encoding);
   }
 
+  /// A copy of the value's bytes as the server sent them: for a `bytea` column
+  /// this is the text `\x...`; see [getBytea].
   Uint8List getValueAsBytes(int row, int column, {int? length}) {
-    if (row < 0 || row >= rows || column < 0 || column >= columns)
-      throw LibPqException("Row or column index out of range!");
-    final valuePoiter = psql.pq.PQgetvalue(res, row, column);
+    return Uint8List.fromList(_nativeBytes(row, column, length));
+  }
 
-    int _length(Pointer<Uint8> codeUnits) {
-      var length = 0;
-      while (codeUnits[length] != 0) {
-        length++;
-      }
-      return length;
-    }
-
-    final codeUnits = valuePoiter.cast<Uint8>();
-    if (length != null) {
-      RangeError.checkNotNegative(length, 'length');
-    } else {
-      length = _length(codeUnits);
-    }
-    return codeUnits.asTypedList(length);
+  /// The bytes of a `bytea` column; `null` for SQL NULL.
+  Uint8List? getBytea(int row, int column) {
+    final text = getValue(row, column);
+    return text == null ? null : decodeBytea(text);
   }
 
   int columnIndex(String column) {
-    for (int i = 0; i < columns; i++) {
-      if (columnNames[i] == column) return i;
-    }
-    throw LibPqException("Column ${column} not found!");
+    final index = columnNames.indexOf(column);
+    if (index < 0) throw LibPqException("Column $column not found!");
+    return index;
   }
 
   /// Returns the column name
   String columnName(int column) {
-    if (column < 0 || column >= columns)
+    if (column < 0 || column >= columns) {
       throw LibPqException("Column index out of range!");
+    }
     return columnNames[column];
   }
 
-  /// Returns the column name
+  /// Returns the name of the column's type. It runs a query the first time a
+  /// type is asked for, so it must not be called while another result is being
+  /// read in single row mode.
   String columnTypeName(int column) {
-    if (column < 0 || column >= columns)
-      throw LibPqException("Column index out of range!");
-    return psql.pqftypename(psql.pq.PQftype(res, column));
+    return psql.pqftypename(columnType(column));
   }
 
   /// Returns the column type oid
   int columnType(int column) {
-    if (column < 0 || column >= columns)
+    if (res == nullptr) throw StateError('This result was disposed');
+    if (column < 0 || column >= columns) {
       throw LibPqException("Column index out of range!");
+    }
     return psql.pq.PQftype(res, column);
   }
 
+  /// A `boolean` value: the server sends `t` or `f`.
   bool getBoolean(int row, int column) {
-    return bool.parse(getValueAsString(row, column));
+    final text = getValueAsString(row, column);
+    switch (text) {
+      case 't':
+      case 'true':
+      case '1':
+        return true;
+      case 'f':
+      case 'false':
+      case '0':
+        return false;
+    }
+    throw FormatException('Not a boolean', text);
   }
 
   int getInt(int row, int column) {
@@ -197,12 +236,14 @@ class PqResult implements IDisposable {
   }
 
   void dump() {
-    for (int col = 0; col < columns; col++)
-      stdout.write('${columnNames[col].toString().padLeft(15)}');
+    for (int col = 0; col < columns; col++) {
+      stdout.write(columnNames[col].padLeft(15));
+    }
     stdout.writeln();
     for (int row = 0; row < rows; row++) {
-      for (int col = 0; col < columns; col++)
-        stdout.write('${getValueAsString(row, col).toString().padLeft(15)}');
+      for (int col = 0; col < columns; col++) {
+        stdout.write((getValue(row, col) ?? 'NULL').padLeft(15));
+      }
       stdout.writeln();
     }
   }

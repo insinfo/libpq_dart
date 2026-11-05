@@ -1,11 +1,19 @@
 name: libpq_dart
-version: 1.1.0
-description: libpq dart bindings
+version: 2.0.0
+description: >-
+  PostgreSQL client for Dart over libpq: FFI bindings, a synchronous API, and an
+  asynchronous API and pool that never block the event loop.
 homepage: https://github.com/insinfo/libpq_dart
 repository: https://github.com/insinfo/libpq_dart
+issue_tracker: https://github.com/insinfo/libpq_dart/issues
+topics:
+  - database
+  - postgresql
+  - ffi
+  - libpq
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  sdk: ^3.6.0
 
 dependencies: 
   path: ^1.9.0
@@ -13,6 +21,8 @@ dependencies:
 
 dev_dependencies:
   ffigen: ^11.0.0
+  lints: ^5.1.1
+  test: ^1.25.0
 
 
 ffigen:

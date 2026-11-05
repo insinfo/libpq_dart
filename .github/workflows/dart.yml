@@ -1,0 +1,64 @@
+name: Dart
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux:
+    name: PostgreSQL ${{ matrix.postgres-version }} (Dart ${{ matrix.sdk }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [3.6.2]
+        postgres-version: ['14', '15', '16', '17', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_USER: dart
+          POSTGRES_PASSWORD: dart
+          POSTGRES_DB: dart_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      LIBPQ_TEST_CONNINFO: host=localhost port=5432 dbname=dart_test user=dart password=dart sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+      - name: Install libpq
+        run: sudo apt-get update && sudo apt-get install -y libpq5
+      - run: dart pub get
+      - run: dart analyze
+      - run: dart test --concurrency 1
+
+  windows:
+    name: Windows, runner's PostgreSQL (Dart 3.6.2)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.6.2
+      - name: Start PostgreSQL
+        shell: pwsh
+        run: |
+          Set-Service postgresql-x64-* -StartupType Manual
+          Start-Service postgresql-x64-*
+          Add-Content $env:GITHUB_PATH "$env:PGBIN"
+          Add-Content $env:GITHUB_ENV "LIBPQ_PATH=$env:PGBIN\libpq.dll"
+      - run: dart pub get
+      - name: Run tests
+        env:
+          LIBPQ_TEST_CONNINFO: host=localhost port=5432 dbname=postgres user=postgres password=root sslmode=disable
+        run: dart test --concurrency 1

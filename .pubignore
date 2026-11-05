@@ -1,0 +1,6 @@
+# Not needed by users of the package.
+.github/
+libpq/
+sql/
+config.yaml
+pubspec.lock

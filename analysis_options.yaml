@@ -1,0 +1,13 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  exclude:
+    - lib/src/generated_bindings.dart
+    - libpq/**
+
+linter:
+  rules:
+    # The binding class and the libpq constants keep their C names.
+    non_constant_identifier_names: false
+    constant_identifier_names: false
+    camel_case_types: false
