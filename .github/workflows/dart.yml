@@ -53,8 +53,7 @@ jobs:
       - name: Start PostgreSQL
         shell: pwsh
         run: |
-          Set-Service postgresql-x64-* -StartupType Manual
-          Start-Service postgresql-x64-*
+          Get-Service 'postgresql*' | Set-Service -StartupType Manual -PassThru | Start-Service
           Add-Content $env:GITHUB_PATH "$env:PGBIN"
           Add-Content $env:GITHUB_ENV "LIBPQ_PATH=$env:PGBIN\libpq.dll"
       - run: dart pub get

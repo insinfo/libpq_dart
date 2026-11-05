@@ -96,7 +96,7 @@ SELECT t.oid AS oid, (n.nspname)::information_schema.sql_identifier AS trigger_s
     'ROW'::text ELSE 'STATEMENT'::text END)::information_schema.character_data AS for_each,
      (CASE WHEN (((t.tgtype)::integer & 2) = 2) THEN 'BEFORE'::text ELSE 'AFTER'::text END)::information_schema.character_data AS fire_time,
       t.tgenabled AS enabled, (CASE WHEN pg_has_role(c.relowner, 'USAGE'::text) 
-      THEN (SELECT rm.m[1] AS m FROM regexp_matches(pg_get_triggerdef(t.oid), (E'.{35,} WHEN \((.+)\) EXECUTE FUNCTION'::text)) rm(m) LIMIT 1)
+      THEN (SELECT rm.m[1] AS m FROM regexp_matches(pg_get_triggerdef(t.oid), (E'.{35,} WHEN ((.+)) EXECUTE FUNCTION'::text)) rm(m) LIMIT 1)
        ELSE NULL::text END)::information_schema.character_data AS condition, tc.event_object_column AS update_columns, 
        (t.tgconstraint > 0) AS is_constraint, t.tgisinternal AS is_internal, obj_description(t.oid) AS comment 
        FROM pg_trigger t 

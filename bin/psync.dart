@@ -13,8 +13,8 @@ class PSync implements IDisposable {
   List<String> srcTables = [];
   List<String> dstTables = [];
 
-  bool _delete = false;
-  SyncMode _mode = SyncMode.Incremental;
+  final bool _delete = false;
+  final SyncMode _mode = SyncMode.Incremental;
 
   /// Should tables on destination deleted that are not existing on source
   bool get delete {
@@ -67,9 +67,9 @@ class PSync implements IDisposable {
       for (String table in dstTables) {
         if (srcTables.contains(table)) continue;
         print(
-          " - ${table}",
+          " - $table",
         );
-        dst.exec("drop table ${table}").dispose();
+        dst.exec("drop table $table").dispose();
       }
     }
   }
@@ -100,7 +100,9 @@ class PSync implements IDisposable {
         "select data_type from information_schema.columns where table_name = '$table' order by ordinal_position");
     for (int row = 0; row < result.rows; row++) {
       if (result.getValueByColNameAsString(row, "data_type").toLowerCase() ==
-          "oid") oids.add(row);
+          "oid") {
+        oids.add(row);
+      }
     }
     result.dispose();
     return oids;
@@ -108,10 +110,11 @@ class PSync implements IDisposable {
 
   void syncContent(String table) {
     List<int> oids = getAllOidColumns(table, src);
-    if (oids.length == 0)
+    if (oids.isEmpty) {
       syncContentNoOids(table);
-    else
+    } else {
       syncContentWithOids(table, oids);
+    }
     print('');
   }
 
@@ -124,7 +127,9 @@ class PSync implements IDisposable {
     ldst.open(id);
     var buf = Uint8List(2048);
     int s;
-    while ((s = lsrc.read(buf, 2048)) > 0) ldst.write(buf, s);
+    while ((s = lsrc.read(buf, 2048)) > 0) {
+      ldst.write(buf, s);
+    }
 
     lsrc.close();
     ldst.close();
@@ -174,7 +179,7 @@ class PSync implements IDisposable {
 
   void syncContentWithOids(String table, List<int> oids) {
     PqResult result;
-    String command, _select, _where, _from;
+    String command, select, where, from;
     bool first;
     List<String> primaryKeys = getPrimaryKeys(table, src);
 
@@ -182,31 +187,31 @@ class PSync implements IDisposable {
     //result.Dump();
     for (int row = 0; row < result.rows; row++) {
       progress(table, row / result.rows, 60);
-      _select = "select";
-      _from = " from";
-      _where = " where";
+      select = "select";
+      from = " from";
+      where = " where";
 
       // Compose the select block
       first = true;
       for (int oid in oids) {
-        if (!first) _select += ",";
+        if (!first) select += ",";
         // Get the md5 hash value for the oid-column
-        _select += " md5(${result.columnName(oid)})";
+        select += " md5(${result.columnName(oid)})";
         first = false;
       }
 
       // Data from the table we are currently working on
-      _from += table;
+      from += table;
 
       // The row identified by the primary keys of the table
       first = true;
       for (String key in primaryKeys) {
-        if (!first) _where += " and";
-        _where +=
+        if (!first) where += " and";
+        where +=
             " $key='${result.getValueAsString(row, result.columnIndex(key))}'";
         first = false;
       }
-      command = _select + _from + _where;
+      command = select + from + where;
 
       PqResult r1, r2;
       try {
@@ -219,7 +224,7 @@ class PSync implements IDisposable {
             if (r1.getValueAsString(0, c) != r2.getValueAsString(0, c)) {
               int id = copyOid(result.getInt(row, oids[c]));
               command =
-                  "update $table set ${result.columnName(oids[c])}='$id'$_where";
+                  "update $table set ${result.columnName(oids[c])}='$id'$where";
               dst.exec(command).dispose();
             }
           }
@@ -239,8 +244,7 @@ class PSync implements IDisposable {
           dst.exec(command).dispose();
           for (int oid in oids) {
             int id = copyOid(result.getInt(row, oid));
-            command =
-                "update $table set ${result.columnName(oid)}='$id'$_where";
+            command = "update $table set ${result.columnName(oid)}='$id'$where";
             dst.exec(command).dispose();
           }
           //Console.WriteLine("Insert data into table");
@@ -249,7 +253,7 @@ class PSync implements IDisposable {
         // Console.WriteLine(e.Message);
         for (int oid in oids) {
           int id = copyOid(result.getInt(row, oid));
-          command = "update $table set ${result.columnName(oid)}='$id'$_where";
+          command = "update $table set ${result.columnName(oid)}='$id'$where";
           dst.exec(command).dispose();
         }
       }
@@ -314,8 +318,9 @@ class PSync implements IDisposable {
 
       result = db.exec(
           "select table_name from information_schema.tables where table_schema='public' and table_type='BASE TABLE'");
-      for (int row = 0; row < result.rows; row++)
+      for (int row = 0; row < result.rows; row++) {
         tables.add(result.getValueAsString(row, 0));
+      }
       result.dispose();
       return tables;
     } catch (e) {
@@ -329,10 +334,11 @@ class PSync implements IDisposable {
     int x = (p * size).floor();
     stdout.write('${title.padRight(20)} |');
     for (int i = 0; i < size; i++) {
-      if (i <= x)
+      if (i <= x) {
         stdout.write('=');
-      else
+      } else {
         stdout.write('-');
+      }
     }
     stdout.write('| ${(p * 100).floor()}%\r');
   }
