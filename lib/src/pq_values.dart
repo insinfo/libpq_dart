@@ -740,8 +740,9 @@ Object? _binaryDate(int days, PqInfinity infinity) {
 }
 
 Object? _binaryTimestamp(int micros, PqInfinity infinity) {
-  if (micros == 0x7fffffffffffffff)
+  if (micros == 0x7fffffffffffffff) {
     return _beyondDateTime('infinity', infinity);
+  }
   if (micros == -9223372036854775808) {
     return _beyondDateTime('-infinity', infinity);
   }
@@ -821,7 +822,9 @@ String _binaryUuid(Uint8List bytes) {
   final codes = Uint8List(36);
   var out = 0;
   for (var i = 0; i < 16; i++) {
-    if (i == 4 || i == 6 || i == 8 || i == 10) codes[out++] = 0x2D;
+    if (i == 4 || i == 6 || i == 8 || i == 10) {
+      codes[out++] = 0x2D;
+    }
     codes[out++] = _hexDigits[bytes[i] >> 4];
     codes[out++] = _hexDigits[bytes[i] & 15];
   }
