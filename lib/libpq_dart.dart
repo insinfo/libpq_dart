@@ -10,4 +10,9 @@ export 'src/large_object.dart';
 export 'src/library_loader.dart' show openLibpq, defaultLibraryNames;
 export 'src/pq_async.dart';
 export 'src/pq_async_pool.dart';
-
+export 'src/pq_values.dart'
+    show
+        decodePgValue,
+        formatCopyRow,
+        questionMarksToNumbered,
+        Windows1252Codec;

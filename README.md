@@ -54,31 +54,59 @@ libpq blocks the thread that calls it, and Dart has no way to watch libpq's sock
 
 ### Results
 
-`execute` returns a `PqAsyncResult`, already in Dart memory, with nothing to dispose. Values are the **server's text**; SQL NULL is `null`.
+`execute` returns a `PqAsyncResult`, already in Dart memory, with nothing to dispose. Values are decoded by their type, in the connection's isolate:
+
+| PostgreSQL | Dart |
+| --- | --- |
+| `int2`, `int4`, `int8`, `oid` | `int` |
+| `float4`, `float8` | `double` |
+| `bool` | `bool` |
+| `numeric` | `String`, the exact text |
+| `date`, `timestamp` | `DateTime` in UTC, with the fields the server shows |
+| `timestamptz` | `DateTime` in UTC, the same instant |
+| `json`, `jsonb` | decoded `Map`, `List`... |
+| `bytea` | `Uint8List` |
+| arrays of these and of text types | `List<T?>` |
+| everything else (`inet`, `interval`, `time`, ranges, enums...) | `String`, the server's text |
+
+SQL NULL is `null`. A date `DateTime` cannot represent (`infinity`, BC) stays the server's text. With `typed: false` every value is the server's text.
 
 ```dart
 final r = await db.execute('select 1 as a, null as b');
-r.columns;      // ['a', 'b']
-r.columnTypes;  // type oids
-r.rows;         // [['1', null]]
-r.first['a'];   // '1'
-r.toMaps();     // [{'a': '1', 'b': null}]
-r.commandTag;   // 'SELECT 1'
-r.affectedRows; // 1
+r.columns;        // ['a', 'b']
+r.columnTypes;    // type oids
+r.rows;           // [[1, null]]
+r.first['a'];     // 1
+r.first.toColumnMap(); // {'a': 1, 'b': null}
+r.toColumnMaps(); // [{'a': 1, 'b': null}]
+r.commandTag;     // 'SELECT 1'
+r.affectedRows;   // 1
 ```
 
 ### Parameters
 
-They are numbered `$1`, `$2`... and never read as SQL. `null` is SQL NULL, a `Uint8List` goes in binary, a `DateTime` in ISO 8601, and any other value is its `toString()`, for the server to convert.
+They are numbered `$1`, `$2`... and never read as SQL.
+
+| Dart | Sent as |
+| --- | --- |
+| `null` | SQL NULL |
+| `Uint8List` | bytes, in binary |
+| `List`, `Set` | an array, so `= ANY($1)` works |
+| `Map` | JSON |
+| `DateTime` | ISO 8601 with its offset |
+| anything else | its `toString()`, for the server to convert |
 
 ```dart
 await db.execute(r'insert into files (name, body) values ($1, $2)',
     params: ['a.png', bytes]);
-final row = (await db.execute('select body from files')).first;
-final Uint8List? body = row.bytea('body');
+await db.execute(r'select * from users where id = any($1)', params: [[1, 2, 3]]);
 ```
 
+A JSON array for a `json` column is ambiguous with a PostgreSQL array: pass it through `jsonEncode`.
+
 Without parameters a statement goes through the simple protocol, so a script with several statements runs whole and returns its last result.
+
+For code written with `?` placeholders, `questionMarksToNumbered(sql)` converts them, leaving alone what is inside strings, identifiers, comments and dollar quotes; `??` is a literal `?`.
 
 ### Large results
 
@@ -95,15 +123,61 @@ await for (final row in db.stream('select * from huge_table')) {
 `BEGIN` before the callback, `COMMIT` after it, `ROLLBACK` if it throws. Commands from other callers wait until it ends. Inside the callback, use the session it receives: using the connection there fails at once instead of deadlocking.
 
 ```dart
-final id = await db.transaction((tx) async {
+final balance = await db.transaction((tx) async {
   await tx.execute(r'update accounts set balance = balance - $1 where id = 1',
       params: [100]);
   final r = await tx.execute('select balance from accounts where id = 1');
   return r.first['balance'];
+}, isolationLevel: PqIsolationLevel.serializable);
+```
+
+`savepoint` runs a part that can fail without losing the rest. If it throws, it is rolled back, the error is rethrown, and the transaction goes on:
+
+```dart
+await db.transaction((tx) async {
+  await tx.execute('insert into log values (1)');
+  try {
+    await tx.savepoint((sp) => sp.execute('insert into maybe_duplicate values (1)'));
+  } on LibPqException catch (e) {
+    if (e.sqlState != '23505') rethrow;
+  }
+  await tx.execute('insert into log values (2)');
 });
 ```
 
-If a statement failed and the callback caught the error, the commit fails with SQLSTATE `25P02`: PostgreSQL has already rolled the transaction back.
+If a statement failed outside a savepoint and the callback caught the error, the commit fails with SQLSTATE `25P02`: PostgreSQL has already rolled the transaction back. `db.transactionStatus` tells the status of the server after each command.
+
+### COPY
+
+The fastest way to load or export many rows. `copyRows` writes values, converted as parameters are; `copyFrom` and `copyTo` carry the bytes as they are, in any format.
+
+```dart
+final written = await db.copyRows('public.items', ['id', 'name'],
+    [[1, 'first'], [2, null]]);
+
+await db.copyFrom('COPY items FROM STDIN (FORMAT csv)', File('items.csv').openRead());
+
+await for (final chunk in db.copyTo('COPY items TO STDOUT (FORMAT csv)')) {
+  output.add(chunk);
+}
+final text = await db.copyToText('COPY items TO STDOUT');
+```
+
+A source is read as the server takes it, and pausing `copyTo` stops the reading. A source that fails aborts the `COPY`, and nothing is written. They also work inside a transaction, through the session.
+
+### LISTEN and NOTIFY
+
+```dart
+final subscription = db.listen('events').listen((n) {
+  print('${n.channel}: ${n.payload} from ${n.processId}');
+});
+await db.notify('events', 'hello');
+await subscription.cancel(); // UNLISTEN
+```
+
+libpq has to be asked: while a connection has listeners, its isolate checks every `notificationPollInterval` (50 ms by default, in `connect`), so that is about how long a notification can wait. That check also notices a closed connection: the stream gets an error with SQLSTATE `08006` and ends. Nothing is delivered while a command runs on that connection, so use one of its own for listening, not one from a pool.
+
+`db.notifications` has every notification of the connection, for a `LISTEN` you run yourself, and `db.notices` has the server's notices and warnings.
 
 ### Timeouts and cancelling
 
@@ -116,22 +190,47 @@ A timeout asks the server to cancel the query, and the connection stays usable. 
 
 ### Pool
 
-Each connection of the pool has its own isolate, so queries run in parallel. Connections open when needed, up to `maxConnections`, and a lost one is replaced.
+Each connection of the pool has its own isolate, so queries run in parallel. Connections open when needed, up to `maxConnections`.
 
 ```dart
-final pool = LibPqAsyncPool(conninfo, maxConnections: 8);
+final pool = LibPqAsyncPool(
+  conninfo,
+  maxConnections: 8,
+  acquireTimeout: Duration(seconds: 30), // waiting for a free connection
+  queryTimeout: Duration(seconds: 30),
+  idleTestThreshold: Duration(minutes: 1), // select 1 before reusing an idle one
+  maxConnectionAge: Duration(hours: 12),
+  maxCommandCount: 100000,
+  sessionStatements: ["SET search_path TO public, sales"],
+  onOpen: (connection) async { /* runs once per connection */ },
+);
 final results = await Future.wait([
   pool.execute('select 1'),
   pool.execute('select 2'),
 ]);
 await pool.transaction((tx) async { /* ... */ });
 await pool.withConnection((db) async { /* ... */ });
+await pool.copyRows('items', ['id'], [[1]]);
+await for (final row in pool.stream('select * from items')) { /* ... */ }
 await pool.close();
+```
+
+A lost connection is replaced, one past its limits is closed instead of reused, and one returned with a transaction open is closed, so it cannot reach the next caller. `openConnections`, `idleConnections` and `waitingCallers` tell its state.
+
+### Session settings and encodings
+
+`sessionStatements` run right after connecting, and if one fails the connection fails. Time zone and application name also work there, or in the conninfo (`application_name=app`).
+
+For a server or session in `WIN1252`, use the codec with the setting:
+
+```dart
+final db = await LibPqAsync.connect('host=... client_encoding=WIN1252',
+    encoding: const Windows1252Codec());
 ```
 
 ### Errors
 
-`LibPqException` has `message`, `sqlState` (`23505`, `42P01`...), `severity`, `detail`, `hint` and `sql`. When the server closes the connection, the command in progress fails and `isConnected` becomes false.
+`LibPqException` has `message`, `sqlState` (`23505`, `42P01`...), `severity`, `detail`, `hint`, `constraint`, `table`, `column` and `sql`. A lost connection has `sqlState` `08006`: the command in progress fails, and `isConnected` becomes false.
 
 ## Synchronous API
 
@@ -141,8 +240,10 @@ Each call blocks the isolate until libpq returns: use it where nothing else has 
 final pq = LibPq('host=localhost dbname=app user=app password=secret');
 
 final result = pq.execParams(r'select name, age from users where id = $1', [1]);
-print(result.getValue(0, 0)); // null for SQL NULL
-print(result.asMapList());
+print(result.getValue(0, 0)); // the server's text; null for SQL NULL
+print(result.getTyped(0, 1)); // decoded by its type, as in the asynchronous API
+print(result.asMapList());    // values as the server's text
+print(result.toColumnMaps()); // values decoded by their type
 print(result.affectedRows);
 result.dispose(); // frees the native memory
 
@@ -152,6 +253,8 @@ pq.commitTransaction();
 
 pq.dispose();
 ```
+
+`copyFrom`, `copyTo` and `takeNotifications` do what their asynchronous names do, blocking.
 
 ### Large objects
 
@@ -184,7 +287,7 @@ Isolates cannot interrupt a blocking call: if the network dies without closing t
 
 ## Not supported
 
-`COPY` and `LISTEN`/`NOTIFY` have no high-level API yet; `LibpqBindings` has their functions. Binary result format is not used: values come as text.
+The binary result format is not used: values come as text and are decoded. There is no statement cache: each parameterized query is parsed by the server, unlike drivers that prepare statements.
 
 ## Development
 
@@ -195,5 +298,7 @@ set LIBPQ_PATH=C:\Program Files\PostgreSQL\16\bin\libpq.dll
 set LIBPQ_TEST_CONNINFO=host=localhost dbname=test user=dart password=dart sslmode=disable
 dart test --concurrency 1
 ```
+
+`test/stress_rest_api_test.dart` is a REST API under load: several server isolates sharing a port, each with its pool, and clients sending requests at once. It checks for replies to the wrong request, lost updates, rollbacks that saved something and connections left open. It is small by default; `LIBPQ_STRESS_SERVERS`, `LIBPQ_STRESS_CLIENTS`, `LIBPQ_STRESS_REQUESTS`, `LIBPQ_STRESS_IN_FLIGHT` and `LIBPQ_STRESS_POOL` make it heavier.
 
 The CI runs them on PostgreSQL 14 to 18 on Linux, and on Windows. To regenerate the bindings: `dart run ffigen`.

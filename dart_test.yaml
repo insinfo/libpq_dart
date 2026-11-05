@@ -1,0 +1,6 @@
+# The tests share one database, and the stress test creates tables.
+concurrency: 1
+
+tags:
+  # A REST API under load. Small by default; see test/stress_rest_api_test.dart.
+  stress:

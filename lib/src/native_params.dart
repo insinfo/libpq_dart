@@ -2,14 +2,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:typed_data';
 
-/// A query parameter as text, for the server to convert: `null` is SQL NULL,
-/// a [Uint8List] goes in binary, a [DateTime] in ISO 8601, and any other value
-/// is its `toString()`.
-Object? normalizeParam(Object? value) {
-  if (value == null || value is String || value is Uint8List) return value;
-  if (value is DateTime) return value.toIso8601String();
-  return value.toString();
-}
+import 'pq_values.dart';
 
 /// The native arrays of `PQexecParams`, allocated in [arena].
 class NativeParams {
@@ -58,16 +51,4 @@ Pointer<Char> nativeString(String text, Encoding encoding, Allocator arena) {
   view.setAll(0, bytes);
   view[bytes.length] = 0;
   return buffer.cast();
-}
-
-/// The bytes of a `bytea` value in the server's text format (`\x...` hex).
-Uint8List decodeBytea(String text) {
-  if (!text.startsWith(r'\x')) {
-    throw FormatException('Not a bytea in hex format', text);
-  }
-  final out = Uint8List((text.length - 2) ~/ 2);
-  for (var i = 0; i < out.length; i++) {
-    out[i] = int.parse(text.substring(2 + i * 2, 4 + i * 2), radix: 16);
-  }
-  return out;
 }

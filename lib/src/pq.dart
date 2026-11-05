@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart' as ffi;
 import 'package:libpq_dart/src/disposable.dart';
@@ -9,6 +10,7 @@ import 'package:libpq_dart/src/pq_exception.dart';
 
 import 'library_loader.dart';
 import 'native_params.dart';
+import 'pq_async.dart' show PqNotification;
 import 'result.dart';
 
 /// A synchronous libpq connection.
@@ -99,6 +101,7 @@ class LibPq implements IDisposable {
     final resultP = ffi.using(
         (arena) => pq.PQexec(conn, nativeString(query, encoding, arena)),
         allocator);
+    _leaveCopyMode(resultP);
     return PqResult(this, resultP, query);
   }
 
@@ -126,6 +129,150 @@ class LibPq implements IDisposable {
           0);
     }, allocator);
     return PqResult(this, resultP, query);
+  }
+
+  /// A `COPY` through [exec]: without this the connection would stay in COPY
+  /// mode, refusing every other command. [PqResult] then reports the status.
+  void _leaveCopyMode(Pointer<pg_result> result) {
+    if (result == nullptr) return;
+    final status = pq.PQresultStatus(result);
+    if (status == ExecStatusType.PGRES_COPY_IN) {
+      ffi.using((arena) => pq.PQputCopyEnd(
+          conn, nativeString('Use copyFrom for COPY', utf8, arena)));
+      _drain();
+    } else if (status == ExecStatusType.PGRES_COPY_OUT) {
+      final slot = ffi.malloc<Pointer<Char>>();
+      while (pq.PQgetCopyData(conn, slot, 0) > 0) {
+        pq.PQfreemem(slot.value.cast());
+      }
+      ffi.malloc.free(slot);
+      _drain();
+    }
+  }
+
+  void _drain() {
+    while (true) {
+      final result = pq.PQgetResult(conn);
+      if (result == nullptr) return;
+      pq.PQclear(result);
+    }
+  }
+
+  /// Runs a `COPY ... FROM STDIN`, sending [chunks] as they are; returns the
+  /// rows written.
+  int copyFrom(String sql, Iterable<List<int>> chunks) {
+    _checkOpen();
+    final start = ffi
+        .using((arena) => pq.PQexec(conn, nativeString(sql, encoding, arena)));
+    final startStatus = start == nullptr ? -1 : pq.PQresultStatus(start);
+    if (startStatus != ExecStatusType.PGRES_COPY_IN) {
+      _leaveCopyMode(start);
+      if (startStatus == ExecStatusType.PGRES_COPY_OUT ||
+          startStatus == ExecStatusType.PGRES_COMMAND_OK ||
+          startStatus == ExecStatusType.PGRES_TUPLES_OK) {
+        pq.PQclear(start);
+        throw LibPqException('This statement is not a COPY ... FROM STDIN',
+            sql: sql);
+      }
+      PqResult(this, start, sql).dispose();
+      throw LibPqException('This statement is not a COPY ... FROM STDIN',
+          sql: sql);
+    }
+    pq.PQclear(start);
+
+    Object? sourceError;
+    try {
+      for (final chunk in chunks) {
+        if (chunk.isEmpty) continue;
+        final sent = ffi.using((arena) {
+          final buffer = arena<Uint8>(chunk.length);
+          buffer.asTypedList(chunk.length).setAll(0, chunk);
+          return pq.PQputCopyData(conn, buffer.cast(), chunk.length);
+        });
+        if (sent != 1) break; // The result below has the server's error.
+      }
+    } catch (e) {
+      sourceError = e;
+    }
+    ffi.using((arena) => pq.PQputCopyEnd(
+        conn,
+        sourceError == null
+            ? nullptr
+            : nativeString(
+                'The source failed: $sourceError', encoding, arena)));
+    final end = pq.PQgetResult(conn);
+    final PqResult result;
+    try {
+      result = PqResult(this, end, sql);
+    } finally {
+      _drain();
+    }
+    final count = result.affectedRows;
+    result.dispose();
+    if (sourceError != null) throw sourceError;
+    return count;
+  }
+
+  /// Runs a `COPY ... TO STDOUT` and returns all of its output.
+  Uint8List copyTo(String sql) {
+    _checkOpen();
+    final start = ffi
+        .using((arena) => pq.PQexec(conn, nativeString(sql, encoding, arena)));
+    final startStatus = start == nullptr ? -1 : pq.PQresultStatus(start);
+    if (startStatus != ExecStatusType.PGRES_COPY_OUT) {
+      _leaveCopyMode(start);
+      if (startStatus == ExecStatusType.PGRES_COPY_IN ||
+          startStatus == ExecStatusType.PGRES_COMMAND_OK ||
+          startStatus == ExecStatusType.PGRES_TUPLES_OK) {
+        pq.PQclear(start);
+        throw LibPqException('This statement is not a COPY ... TO STDOUT',
+            sql: sql);
+      }
+      PqResult(this, start, sql).dispose();
+      throw LibPqException('This statement is not a COPY ... TO STDOUT',
+          sql: sql);
+    }
+    pq.PQclear(start);
+
+    final out = BytesBuilder(copy: true);
+    final slot = ffi.malloc<Pointer<Char>>();
+    try {
+      while (true) {
+        final length = pq.PQgetCopyData(conn, slot, 0);
+        if (length <= 0) break;
+        out.add(slot.value.cast<Uint8>().asTypedList(length));
+        pq.PQfreemem(slot.value.cast());
+      }
+    } finally {
+      ffi.malloc.free(slot);
+    }
+    final end = pq.PQgetResult(conn);
+    try {
+      PqResult(this, end, sql).dispose();
+    } finally {
+      _drain();
+    }
+    return out.takeBytes();
+  }
+
+  /// The notifications received so far, after a `LISTEN`. Nothing arrives by
+  /// itself here: call it again to look for new ones, or use `LibPqAsync.listen`.
+  List<PqNotification> takeNotifications() {
+    _checkOpen();
+    if (pq.PQconsumeInput(conn) == 0) {
+      throw LibPqException(lastErrorMessage.trim(), sqlState: '08006');
+    }
+    final notifications = <PqNotification>[];
+    while (true) {
+      final notification = pq.PQnotifies(conn);
+      if (notification == nullptr) return notifications;
+      final value = notification.ref;
+      notifications.add(PqNotification(
+          value.relname.asDartString(encoding: encoding),
+          value.extra.asDartString(encoding: encoding),
+          value.be_pid));
+      pq.PQfreemem(notification.cast());
+    }
   }
 
   /// Excecute a sql query return data as list of Map and dispose (Release Resources)

@@ -8,12 +8,16 @@ import 'package:libpq_dart/src/extensions/extensions.dart';
 import 'package:libpq_dart/src/generated_bindings.dart';
 import 'package:libpq_dart/src/pq.dart';
 
-import 'native_params.dart';
 import 'pq_exception.dart';
+import 'pq_values.dart';
 
 /// Reads the error fields of a failed [result].
-LibPqException exceptionFromResult(LibpqBindings pq, Pointer<pg_result> result,
-    Encoding encoding, String? sql) {
+///
+/// libpq reports a connection the server closed as a result with a message and
+/// no fields: given [connection], such an error gets SQLSTATE 08006.
+LibPqException exceptionFromResult(
+    LibpqBindings pq, Pointer<pg_result> result, Encoding encoding, String? sql,
+    [Pointer<pg_conn>? connection]) {
   String? field(int code) {
     final value = pq.PQresultErrorField(result, code);
     return value == nullptr ? null : value.asDartString(encoding: encoding);
@@ -22,10 +26,17 @@ LibPqException exceptionFromResult(LibpqBindings pq, Pointer<pg_result> result,
   return LibPqException(
     pq.PQresultErrorMessage(result).asDartString(encoding: encoding).trim(),
     sql: sql,
-    sqlState: field(PG_DIAG_SQLSTATE),
+    sqlState: field(PG_DIAG_SQLSTATE) ??
+        (connection != null &&
+                pq.PQstatus(connection) != ConnStatusType.CONNECTION_OK
+            ? '08006'
+            : null),
     severity: field(PG_DIAG_SEVERITY_NONLOCALIZED) ?? field(PG_DIAG_SEVERITY),
     detail: field(PG_DIAG_MESSAGE_DETAIL),
     hint: field(PG_DIAG_MESSAGE_HINT),
+    constraint: field(PG_DIAG_CONSTRAINT_NAME),
+    table: field(PG_DIAG_TABLE_NAME),
+    column: field(PG_DIAG_COLUMN_NAME),
   );
 }
 
@@ -57,7 +68,8 @@ class PqResult implements IDisposable {
         _status == ExecStatusType.PGRES_TUPLES_OK);
 
     if (!_valid) {
-      final error = exceptionFromResult(psql.pq, res, psql.encoding, query);
+      final error =
+          exceptionFromResult(psql.pq, res, psql.encoding, query, psql.conn);
       dispose();
       throw error;
     }
@@ -143,6 +155,20 @@ class PqResult implements IDisposable {
       isNull(row, column)
           ? null
           : getValueAsString(row, column, encoding: encoding);
+
+  /// The value decoded by its type (see `decodePgValue`); `null` for SQL NULL.
+  Object? getTyped(int row, int column) {
+    if (isNull(row, column)) return null;
+    return decodePgValue(
+        columnType(column), _nativeBytes(row, column, null), psql.encoding);
+  }
+
+  /// The rows as maps of column name to value decoded by its type, as the other
+  /// PostgreSQL drivers return them. [asMapList] keeps the server's text.
+  List<Map<String, dynamic>> toColumnMaps() => [
+        for (var r = 0; r < _rows; r++)
+          {for (var c = 0; c < _columns; c++) columnNames[c]: getTyped(r, c)}
+      ];
 
   /// The value as text; an empty string for SQL NULL (see [getValue]).
   String getValueAsString(int row, int column,

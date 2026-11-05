@@ -2,8 +2,13 @@
 
 ### Asynchronous API
 
-- `LibPqAsync`: a connection with its own isolate, so connecting and running queries never block the event loop. `execute` with parameters and a timeout, `stream` (single row mode, with backpressure), `transaction`, `cancel` and `close`
-- `LibPqAsyncPool`: a pool of those connections, for parallel queries
+- `LibPqAsync`: a connection with its own isolate, so connecting and running queries never block the event loop. `execute` with parameters and a timeout, `stream` (single row mode, with backpressure), `transaction` with `savepoint`, isolation level and read only, `cancel` and `close`
+- Values decoded by their type, as the other PostgreSQL drivers do: `int`, `double`, `bool`, `DateTime`, decoded JSON, `Uint8List` and arrays; `numeric` keeps its exact text; `typed: false` keeps the server's text. `PqRow.toColumnMap` and `PqAsyncResult.toColumnMaps`
+- Parameters: `null`, `Uint8List` in binary, `List` and `Set` as arrays (`= ANY($1)`), `Map` as JSON and `DateTime` with its offset. `questionMarksToNumbered` converts `?` placeholders
+- COPY: `copyRows`, `copyFrom`, `copyTo`, `copyToText`, with backpressure, also inside a transaction
+- LISTEN and NOTIFY: `listen`, `notify`, `notifications`, and `notices` for the server's notices, which libpq would print to stderr
+- `LibPqAsyncPool`: a pool of those connections for parallel queries, with `acquireTimeout`, `queryTimeout`, `idleTestThreshold`, `maxConnectionAge`, `maxCommandCount`, `sessionStatements` and `onOpen`. A connection returned with a transaction open is closed
+- `sessionStatements`, `queryTimeout`, `transactionStatus`, and `Windows1252Codec`
 
 ### Breaking
 
@@ -28,13 +33,14 @@
 
 ### Added
 
-- `LibPqException`: `sqlState`, `severity`, `detail` and `hint`
-- `PqResult`: `getValue` (`null` for SQL NULL), `isNull`, `commandTag` and `getBytea`
-- `LibPq.execParams` takes `null`, `Uint8List` (binary), `DateTime` and any other value through `toString()`
+- `LibPqException`: `sqlState` (`08006` for a lost connection), `severity`, `detail`, `hint`, `constraint`, `table` and `column`
+- `PqResult`: `getValue` (`null` for SQL NULL), `getTyped`, `toColumnMaps`, `isNull`, `commandTag` and `getBytea`
+- `LibPq.execParams` takes the same parameters as the asynchronous API
+- `LibPq`: `copyFrom`, `copyTo` and `takeNotifications`; a `COPY` through `exec` fails and leaves the connection usable
 - `LibPq.isConnected`, and `commitTransaction` (`comitTransaction` is deprecated)
 - `openLibpq`, the `LIBPQ_PATH` environment variable, and macOS support
 - `PqResult.columnTypeName` keeps the names it has already asked for
-- Tests, CI on PostgreSQL 14 to 18 and on Windows, examples and a full README
+- Tests, a REST API stress test, CI on PostgreSQL 14 to 18 and on Windows, examples and a full README
 
 ## 1.1.0
 

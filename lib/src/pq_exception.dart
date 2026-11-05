@@ -8,8 +8,9 @@ class LibPqException implements Exception {
   /// Kept for compatibility: always -1. Use [sqlState].
   final int errorCode;
 
-  /// The SQLSTATE of a server error (`23505`, `42P01`...); null for an error
-  /// that did not come from the server.
+  /// The SQLSTATE of a server error (`23505`, `42P01`...). A connection that
+  /// was lost has `08006`, also when the server did not say so. Null for other
+  /// errors of the client.
   final String? sqlState;
 
   /// The severity of a server error (`ERROR`, `FATAL`...).
@@ -21,6 +22,15 @@ class LibPqException implements Exception {
   /// The optional hint of a server error.
   final String? hint;
 
+  /// The constraint a server error refers to (a unique violation, for example).
+  final String? constraint;
+
+  /// The table a server error refers to.
+  final String? table;
+
+  /// The column a server error refers to.
+  final String? column;
+
   LibPqException(
     this.message, {
     this.sql,
@@ -29,6 +39,9 @@ class LibPqException implements Exception {
     this.severity,
     this.detail,
     this.hint,
+    this.constraint,
+    this.table,
+    this.column,
   });
 
   @override

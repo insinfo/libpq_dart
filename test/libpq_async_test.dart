@@ -28,7 +28,7 @@ Future<Duration> longestStall(Future<void> Function() action) async {
 void main() {
   late LibPqAsync db;
 
-  setUp(() async => db = await LibPqAsync.connect(conninfo));
+  setUp(() async => db = await LibPqAsync.connect(conninfo, typed: false));
   tearDown(() => db.close());
 
   group('connect', () {
@@ -167,7 +167,7 @@ void main() {
 
     test('while connecting and closing', () async {
       final stall = await longestStall(() async {
-        final other = await LibPqAsync.connect(conninfo);
+        final other = await LibPqAsync.connect(conninfo, typed: false);
         await other.close();
       });
       expect(stall, lessThan(const Duration(milliseconds: 500)));
@@ -212,7 +212,7 @@ void main() {
 
   group('stream', () {
     test('delivers every row, in order, past several batches', () async {
-      final seen = <String?>[];
+      final seen = <Object?>[];
       await for (final row in db.stream(
           r'select g as n from generate_series(1, $1::int) g',
           params: [1000],
@@ -242,7 +242,7 @@ void main() {
     });
 
     test('an error in the middle delivers the rows before it', () async {
-      final seen = <String?>[];
+      final seen = <Object?>[];
       Object? error;
       await for (final row in db
           .stream('select 1 / (3 - g) as v from generate_series(1, 5) g',
@@ -296,7 +296,7 @@ void main() {
   group('transaction', () {
     setUp(() => db.execute('create temporary table t_t (id int)'));
 
-    Future<List<String?>> ids() async => [
+    Future<List<Object?>> ids() async => [
           for (final r in await db.execute('select id from t_t order by id'))
             r['id']
         ];
@@ -311,24 +311,21 @@ void main() {
     });
 
     test('an exception rolls back, and is rethrown', () async {
-      await expectLater(
-          db.transaction((tx) async {
-            await tx.execute('insert into t_t values (1)');
-            throw StateError('stop');
-          }),
-          throwsStateError);
+      await expectLater(db.transaction((tx) async {
+        await tx.execute('insert into t_t values (1)');
+        throw StateError('stop');
+      }), throwsStateError);
       expect(await ids(), isEmpty);
     });
 
     test('a failed statement caught by the callback: the commit fails',
         () async {
-      await expectLater(
-          db.transaction((tx) async {
-            await tx.execute('insert into t_t values (1)');
-            try {
-              await tx.execute('select 1/0');
-            } on LibPqException catch (_) {}
-          }),
+      await expectLater(db.transaction((tx) async {
+        await tx.execute('insert into t_t values (1)');
+        try {
+          await tx.execute('select 1/0');
+        } on LibPqException catch (_) {}
+      }),
           throwsA(isA<LibPqException>()
               .having((e) => e.sqlState, 'sqlState', '25P02')));
       expect(await ids(), isEmpty);
@@ -354,8 +351,7 @@ void main() {
         () async {
       await expectLater(
           db.transaction((tx) => db.execute('select 1')), throwsStateError);
-      await expectLater(
-          db.transaction((tx) => db.transaction((t) async {})),
+      await expectLater(db.transaction((tx) => db.transaction((t) async {})),
           throwsStateError);
       expect(await ids(), isEmpty);
     });
@@ -387,14 +383,14 @@ void main() {
 
   group('close', () {
     test('waits for what is queued', () async {
-      final other = await LibPqAsync.connect(conninfo);
+      final other = await LibPqAsync.connect(conninfo, typed: false);
       final running = other.execute('select pg_sleep(0.2), 1 as v');
       await other.close();
       expect((await running).first['v'], '1');
     });
 
     test('can be called twice; afterwards commands are refused', () async {
-      final other = await LibPqAsync.connect(conninfo);
+      final other = await LibPqAsync.connect(conninfo, typed: false);
       await other.close();
       await other.close();
       expect(other.isConnected, isFalse);
@@ -403,7 +399,7 @@ void main() {
     });
 
     test('a command that does not end cannot hold it forever', () async {
-      final other = await LibPqAsync.connect(conninfo);
+      final other = await LibPqAsync.connect(conninfo, typed: false);
       final running = other.execute('select pg_sleep(4)');
       final failed = expectLater(running, throwsA(anything));
       final watch = Stopwatch()..start();
@@ -423,7 +419,7 @@ void main() {
     }
 
     test('the next command fails, and later ones are refused', () async {
-      final other = await LibPqAsync.connect(conninfo);
+      final other = await LibPqAsync.connect(conninfo, typed: false);
       addTearDown(other.close);
       await terminate(other);
       await expectLater(
@@ -434,7 +430,7 @@ void main() {
     });
 
     test('a query in progress fails instead of waiting', () async {
-      final other = await LibPqAsync.connect(conninfo);
+      final other = await LibPqAsync.connect(conninfo, typed: false);
       addTearDown(other.close);
       final pid =
           (await other.execute('select pg_backend_pid() as p')).first['p'];
@@ -447,7 +443,7 @@ void main() {
     });
 
     test('close still ends', () async {
-      final other = await LibPqAsync.connect(conninfo);
+      final other = await LibPqAsync.connect(conninfo, typed: false);
       await terminate(other);
       await other.close().timeout(const Duration(seconds: 5));
     });
@@ -455,7 +451,7 @@ void main() {
 
   group('pool', () {
     test('runs queries in parallel', () async {
-      final pool = LibPqAsyncPool(conninfo, maxConnections: 4);
+      final pool = LibPqAsyncPool(conninfo, maxConnections: 4, typed: false);
       addTearDown(pool.close);
       final watch = Stopwatch()..start();
       await Future.wait(
@@ -465,7 +461,7 @@ void main() {
     });
 
     test('never opens more than maxConnections, and queues the rest', () async {
-      final pool = LibPqAsyncPool(conninfo, maxConnections: 2);
+      final pool = LibPqAsyncPool(conninfo, maxConnections: 2, typed: false);
       addTearDown(pool.close);
       final pids = await Future.wait([
         for (var i = 0; i < 20; i++)
@@ -477,7 +473,7 @@ void main() {
     });
 
     test('a transaction holds its connection', () async {
-      final pool = LibPqAsyncPool(conninfo, maxConnections: 2);
+      final pool = LibPqAsyncPool(conninfo, maxConnections: 2, typed: false);
       addTearDown(pool.close);
       final value = await pool.transaction((tx) async {
         await tx.execute('create temporary table t_p (id int)');
@@ -488,7 +484,7 @@ void main() {
     });
 
     test('a lost connection is replaced', () async {
-      final pool = LibPqAsyncPool(conninfo, maxConnections: 1);
+      final pool = LibPqAsyncPool(conninfo, maxConnections: 1, typed: false);
       addTearDown(pool.close);
       final pid =
           (await pool.execute('select pg_backend_pid() as p')).first['p'];
@@ -514,7 +510,7 @@ void main() {
     });
 
     test('close refuses new work and whoever waits', () async {
-      final pool = LibPqAsyncPool(conninfo, maxConnections: 1);
+      final pool = LibPqAsyncPool(conninfo, maxConnections: 1, typed: false);
       await pool.execute('select 1');
       await pool.close();
       await expectLater(pool.execute('select 1'), throwsStateError);

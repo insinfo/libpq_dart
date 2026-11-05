@@ -17,6 +17,20 @@ Future<void> main() async {
   await for (final row in db.stream('select generate_series(1, 3) as n')) {
     print(row['n']);
   }
+
+  // Bulk load, and a notification.
+  await db.execute('create temporary table items (id int, name text)');
+  await db.copyRows('items', [
+    'id',
+    'name'
+  ], [
+    [1, 'first'],
+    [2, null],
+  ]);
+  final subscription = db.listen('events').listen(print);
+  await db.notify('events', 'hello');
+  await Future<void>.delayed(const Duration(milliseconds: 200));
+  await subscription.cancel();
   await db.close();
 
   // Parallel queries: each connection of a pool has its own isolate.
