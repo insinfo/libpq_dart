@@ -13,6 +13,7 @@ export 'src/pq_async_pool.dart';
 export 'src/pq_values.dart'
     show
         decodePgValue,
+        PqInfinity,
         formatCopyRow,
         questionMarksToNumbered,
         Windows1252Codec;

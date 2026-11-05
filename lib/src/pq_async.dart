@@ -34,8 +34,13 @@ class PqAsyncResult extends Iterable<PqRow> {
   /// command that has no such count.
   final int affectedRows;
 
+  /// Whether the values came in the binary format (see `binary` in
+  /// [LibPqAsync.connect]). They are the same either way.
+  final bool binary;
+
   PqAsyncResult._(this.columns, this.columnTypes, this.rows, this.commandTag,
-      this.affectedRows);
+      this.affectedRows,
+      [this.binary = false]);
 
   late final Map<String, int> _indexes = {
     for (var i = 0; i < columns.length; i++) columns[i]: i
@@ -277,6 +282,17 @@ class LibPqAsync implements PqSession {
   /// - [encoding] encodes and decodes text; it must match `client_encoding`.
   /// - [typed] decodes values by their type (see `decodePgValue`), as the other
   ///   PostgreSQL drivers do; `false` keeps the server's text.
+  /// - [infinity] says what a date `DateTime` cannot represent reads as: `null`
+  ///   by default, or the text or an exception.
+  /// - [statementCacheSize] prepares each `select`, `insert`, `update`, `delete`,
+  ///   `with`, `values`, `table` or `merge` the first time it runs, and keeps up
+  ///   to this many, so the server does not parse them again. 0, the default,
+  ///   prepares nothing: a pooler in transaction mode, like PgBouncer, cannot
+  ///   keep prepared statements.
+  /// - [binary] has those statements return their values in the binary format,
+  ///   when the server can send, and this driver read, all their columns that
+  ///   way; otherwise they stay in text. The values are the same. It needs a
+  ///   [statementCacheSize].
   /// - [sessionStatements] run right after connecting (`SET search_path...`).
   ///   If one fails, the connection fails.
   /// - [queryTimeout] is the timeout of commands that do not give one.
@@ -288,10 +304,14 @@ class LibPqAsync implements PqSession {
     String? libraryPath,
     Encoding encoding = const Utf8Codec(allowMalformed: true),
     bool typed = true,
+    PqInfinity infinity = PqInfinity.toNull,
+    int statementCacheSize = 0,
+    bool binary = false,
     List<String> sessionStatements = const [],
     Duration? queryTimeout,
     Duration notificationPollInterval = const Duration(milliseconds: 50),
   }) async {
+    checkStatementSettings(statementCacheSize, binary, typed);
     final ready = Completer<List<Object?>>();
     final port = RawReceivePort();
     void Function(Object?) handler = (message) {};
@@ -307,8 +327,17 @@ class LibPqAsync implements PqSession {
     try {
       isolate = await Isolate.spawn(
           _workerMain,
-          _WorkerStart(port.sendPort, conninfo, connectTimeout.inSeconds,
-              libraryPath, encoding, typed, sessionStatements),
+          _WorkerStart(
+              port.sendPort,
+              conninfo,
+              connectTimeout.inSeconds,
+              libraryPath,
+              encoding,
+              typed,
+              infinity,
+              statementCacheSize,
+              binary,
+              sessionStatements),
           debugName: 'libpq connection',
           errorsAreFatal: true,
           onExit: port.sendPort,
@@ -1049,6 +1078,7 @@ PqAsyncResult _resultFromReply(List<Object?> data) => PqAsyncResult._(
       (data[2] as List).cast<List<Object?>>(),
       data[3] as String,
       data[4] as int,
+      data[5] as bool,
     );
 
 /// A function of its own: the closure must capture nothing but these values.
@@ -1095,8 +1125,17 @@ abstract final class _Reply {
 }
 
 class _WorkerStart {
-  _WorkerStart(this.toMain, this.conninfo, this.connectTimeoutSeconds,
-      this.libraryPath, this.encoding, this.typed, this.sessionStatements);
+  _WorkerStart(
+      this.toMain,
+      this.conninfo,
+      this.connectTimeoutSeconds,
+      this.libraryPath,
+      this.encoding,
+      this.typed,
+      this.infinity,
+      this.statementCacheSize,
+      this.binary,
+      this.sessionStatements);
 
   final SendPort toMain;
   final String conninfo;
@@ -1104,7 +1143,18 @@ class _WorkerStart {
   final String? libraryPath;
   final Encoding encoding;
   final bool typed;
+  final PqInfinity infinity;
+  final int statementCacheSize;
+  final bool binary;
   final List<String> sessionStatements;
+}
+
+/// A statement prepared on a connection, and the format of its results.
+class _Statement {
+  _Statement(this.name, this.binary);
+
+  final String name;
+  final bool binary;
 }
 
 List<Object?> _errorFields(String message, {String? sql, String? sqlState}) =>
@@ -1158,8 +1208,8 @@ void _workerMain(_WorkerStart start) {
   }
 
   final fromMain = RawReceivePort();
-  final worker =
-      _Worker(pq, conn, start.encoding, start.typed, start.toMain, fromMain);
+  final worker = _Worker(pq, conn, start.encoding, start.typed, start.infinity,
+      start.statementCacheSize, start.binary, start.toMain, fromMain);
   _Worker.current = worker;
   pq.PQsetNoticeProcessor(
       conn,
@@ -1204,14 +1254,17 @@ class _Worker {
   /// This isolate's worker: a notice processor cannot carry Dart state.
   static _Worker? current;
 
-  _Worker(
-      this.pq, this.conn, this.encoding, this.typed, this.toMain, this.fromMain)
+  _Worker(this.pq, this.conn, this.encoding, this.typed, this.infinity,
+      this.statementCacheSize, this.binary, this.toMain, this.fromMain)
       : cancelHandle = pq.PQgetCancel(conn);
 
   final LibpqBindings pq;
   final Pointer<pg_conn> conn;
   final Encoding encoding;
   final bool typed;
+  final PqInfinity infinity;
+  final int statementCacheSize;
+  final bool binary;
   final SendPort toMain;
   final RawReceivePort fromMain;
   final Pointer<PGcancel> cancelHandle;
@@ -1344,16 +1397,145 @@ class _Worker {
     }
   }
 
-  void _execute(int id, String sql, List<Object?> params) {
-    final result = using((arena) {
-      final text = nativeString(sql, encoding, arena);
-      // Without parameters, the simple protocol: a script with several
-      // statements runs whole, and PQexec returns the last result.
-      if (params.isEmpty) return pq.PQexec(conn, text);
-      final native = NativeParams.allocate(params, encoding, arena);
-      return pq.PQexecParams(conn, text, native.count, nullptr, native.values,
-          native.lengths, native.formats, 0);
+  // ---------------------------------------------------- prepared statements ---
+
+  /// The prepared statements by their SQL; the first is the least recently used.
+  final Map<String, _Statement> _statements = {};
+
+  /// Statements out of the cache, still prepared on the server.
+  final List<String> _toDeallocate = [];
+  int _statementCount = 0;
+
+  /// What is worth a plan. `BEGIN`, `SET`, DDL have none, and a savepoint's name
+  /// would fill the cache.
+  static final RegExp _hasPlan = RegExp(
+      r'^\s*(select|with|insert|update|delete|values|table|merge)\b',
+      caseSensitive: false);
+
+  /// A statement with several commands cannot be prepared: it goes on as a
+  /// script. A `;` in a string only means this one is not cached.
+  bool _cacheable(String sql) {
+    if (statementCacheSize == 0) return false;
+    final semicolon = sql.indexOf(';');
+    if (semicolon >= 0 && sql.substring(semicolon + 1).trim().isNotEmpty) {
+      return false;
+    }
+    return _hasPlan.hasMatch(sql);
+  }
+
+  /// The statement of [sql], prepared if it was not; null if it is not cached.
+  _Statement? _statementFor(String sql) {
+    final found = _statements.remove(sql);
+    if (found != null) {
+      _statements[sql] = found;
+      return found;
+    }
+    if (!_cacheable(sql)) return null;
+
+    final name = 'libpq_dart_${_statementCount++}';
+    final statement = using((arena) {
+      final nativeName = nativeString(name, utf8, arena);
+      final prepared = pq.PQprepare(
+          conn, nativeName, nativeString(sql, encoding, arena), 0, nullptr);
+      _checkResult(prepared, sql);
+      pq.PQclear(prepared);
+      return _Statement(name, binary && _allColumnsBinary(nativeName, sql));
     });
+    _statements[sql] = statement;
+    if (_statements.length > statementCacheSize) {
+      _forget(_statements.keys.first);
+    }
+    _deallocate();
+    return statement;
+  }
+
+  /// The types come from the server before running: a type this driver cannot
+  /// read, or the server cannot send (`aclitem`), keeps the statement in text.
+  bool _allColumnsBinary(Pointer<Char> name, String sql) {
+    final description = pq.PQdescribePrepared(conn, name);
+    _checkResult(description, sql);
+    try {
+      for (var c = 0; c < pq.PQnfields(description); c++) {
+        if (!hasBinaryDecoder(pq.PQftype(description, c), infinity)) {
+          return false;
+        }
+      }
+      return true;
+    } finally {
+      pq.PQclear(description);
+    }
+  }
+
+  void _forget(String sql) {
+    final statement = _statements.remove(sql);
+    if (statement != null) _toDeallocate.add(statement.name);
+  }
+
+  bool get _isIdle =>
+      pq.PQtransactionStatus(conn) == PGTransactionStatusType.PQTRANS_IDLE;
+
+  /// Only outside a transaction: a name the server does not know, after someone
+  /// else's `DEALLOCATE ALL`, would abort it.
+  void _deallocate() {
+    if (_toDeallocate.isEmpty || !_isIdle) return;
+    for (final name in _toDeallocate) {
+      final result = using((arena) =>
+          pq.PQexec(conn, nativeString('DEALLOCATE $name', utf8, arena)));
+      if (result != nullptr) pq.PQclear(result);
+    }
+    _toDeallocate.clear();
+  }
+
+  /// A statement the server no longer has (`DEALLOCATE ALL`, `DISCARD ALL`), or
+  /// that now returns other columns (`cached plan must not change result type`).
+  bool _isStale(Pointer<pg_result> result) {
+    if (result == nullptr ||
+        pq.PQresultStatus(result) != ExecStatusType.PGRES_FATAL_ERROR) {
+      return false;
+    }
+    final state = pq.PQresultErrorField(result, PG_DIAG_SQLSTATE);
+    if (state == nullptr) return false;
+    final code = state.asDartString();
+    return code == '26000' || code == '0A000';
+  }
+
+  Pointer<pg_result> _send(
+          String sql, List<Object?> params, _Statement? statement) =>
+      using((arena) {
+        if (statement != null) {
+          final native = NativeParams.allocate(params, encoding, arena);
+          return pq.PQexecPrepared(
+              conn,
+              nativeString(statement.name, utf8, arena),
+              native.count,
+              native.values,
+              native.lengths,
+              native.formats,
+              statement.binary ? 1 : 0);
+        }
+        final text = nativeString(sql, encoding, arena);
+        // Without parameters, the simple protocol: a script with several
+        // statements runs whole, and PQexec returns the last result.
+        if (params.isEmpty) return pq.PQexec(conn, text);
+        final native = NativeParams.allocate(params, encoding, arena);
+        return pq.PQexecParams(conn, text, native.count, nullptr, native.values,
+            native.lengths, native.formats, 0);
+      });
+
+  void _execute(int id, String sql, List<Object?> params) {
+    var statement = _statementFor(sql);
+    var result = _send(sql, params, statement);
+    if (statement != null && _isStale(result)) {
+      _forget(sql);
+      // Outside a transaction nothing ran, so it can run again. Inside, the
+      // transaction is already aborted: the error goes to the caller.
+      if (_isIdle) {
+        pq.PQclear(result);
+        statement = _statementFor(sql);
+        result = _send(sql, params, statement);
+      }
+    }
+    final inBinary = statement?.binary ?? false;
     if (result != nullptr) _leaveCopyMode(result);
     _checkResult(result, sql);
     try {
@@ -1361,7 +1543,7 @@ class _Worker {
       final columnCount = pq.PQnfields(result);
       final types = _columnTypes(result, columnCount);
       final rows = List<List<Object?>>.generate(
-          rowCount, (r) => _row(result, r, columnCount, types),
+          rowCount, (r) => _row(result, r, columnCount, types, inBinary),
           growable: false);
       _reply(id, _Reply.ok, [
         _columnNames(result, columnCount),
@@ -1370,6 +1552,7 @@ class _Worker {
         pq.PQcmdStatus(result).asDartString(encoding: encoding),
         int.tryParse(pq.PQcmdTuples(result).asDartString(encoding: encoding)) ??
             0,
+        inBinary,
       ]);
     } finally {
       pq.PQclear(result);
@@ -1395,15 +1578,18 @@ class _Worker {
         'execute');
   }
 
-  List<Object?> _row(
-      Pointer<pg_result> result, int row, int columnCount, List<int> types) {
+  List<Object?> _row(Pointer<pg_result> result, int row, int columnCount,
+      List<int> types, bool inBinary) {
     return List<Object?>.generate(columnCount, (c) {
       if (pq.PQgetisnull(result, row, c) == 1) return null;
       final length = pq.PQgetlength(result, row, c);
       final bytes =
           pq.PQgetvalue(result, row, c).cast<Uint8>().asTypedList(length);
+      if (inBinary) {
+        return decodeBinaryPgValue(types[c], bytes, encoding, infinity);
+      }
       return typed
-          ? decodePgValue(types[c], bytes, encoding)
+          ? decodePgValue(types[c], bytes, encoding, infinity)
           : encoding.decode(bytes);
     }, growable: false);
   }
@@ -1418,12 +1604,37 @@ class _Worker {
 
   List<String> _streamColumns = const [];
   List<int> _streamTypes = const [];
+  bool _streamBinary = false;
 
-  void _streamStart(int id, String sql, List<Object?> params, int batchSize) {
+  /// How to start the stream again, while it may have a stale statement.
+  void Function(int id)? _streamRetry;
+
+  void _streamStart(int id, String sql, List<Object?> params, int batchSize,
+      {bool mayRetry = true}) {
     _streamColumns = const [];
     _streamTypes = const [];
+    final statement = _statementFor(sql);
+    _streamBinary = statement?.binary ?? false;
+    _streamRetry = statement == null || !mayRetry
+        ? null
+        : (id) {
+            _forget(sql);
+            if (_isIdle) {
+              _streamStart(id, sql, params, batchSize, mayRetry: false);
+            }
+          };
     final sent = using((arena) {
       final native = NativeParams.allocate(params, encoding, arena);
+      if (statement != null) {
+        return pq.PQsendQueryPrepared(
+            conn,
+            nativeString(statement.name, utf8, arena),
+            native.count,
+            native.values,
+            native.lengths,
+            native.formats,
+            statement.binary ? 1 : 0);
+      }
       return pq.PQsendQueryParams(
           conn,
           nativeString(sql, encoding, arena),
@@ -1461,11 +1672,28 @@ class _Worker {
             _streamTypes = _columnTypes(result, columnCount);
           }
           if (status == ExecStatusType.PGRES_SINGLE_TUPLE) {
-            rows.add(_row(result, 0, columnCount, _streamTypes));
+            try {
+              _streamRetry = null;
+              rows.add(
+                  _row(result, 0, columnCount, _streamTypes, _streamBinary));
+            } catch (_) {
+              // A value that cannot be decoded: the rest of the result must be
+              // read, or the next command fails.
+              _drain();
+              rethrow;
+            }
           }
         } else if (status != ExecStatusType.PGRES_COMMAND_OK) {
+          final stale = _streamRetry != null && _isStale(result);
           final error = exceptionFromResult(pq, result, encoding, null, conn);
           _drain();
+          if (stale) {
+            final retry = _streamRetry!;
+            _streamRetry = null;
+            final wasIdle = _isIdle;
+            retry(id);
+            if (wasIdle) return;
+          }
           throw error;
         }
       } finally {

@@ -1,3 +1,11 @@
+## 2.1.0
+
+- `statementCacheSize` in `LibPqAsync.connect` and `LibPqAsyncPool`: statements are prepared the first time they run and reused, in a cache by connection, so the server does not parse them again. A statement the server lost (`DEALLOCATE ALL`, `DISCARD ALL`) or whose columns changed is prepared again and run again outside a transaction. Off by default, as a pooler in transaction mode cannot keep prepared statements
+- `binary` in `LibPqAsync.connect` and `LibPqAsyncPool`: cached statements return their values in the binary format. The values are the same as in text: a statement with a column it cannot read that way (`inet`, `interval`, `float4`, an enum, `aclitem`...) stays in text, decided before running. `PqAsyncResult.binary` tells which one a result used
+- A date `DateTime` cannot represent (`infinity`, `-infinity`, a year past its range) is `null`, as in the other PostgreSQL drivers; it was the server's text, so `as DateTime` failed. The `infinity` setting of `LibPqAsync.connect`, `LibPqAsyncPool` and `LibPq` chooses `PqInfinity.text` or `PqInfinity.exception`
+- BC dates are a `DateTime` with the astronomical year (44 BC is the year -43), as in the other PostgreSQL drivers; they were the server's text
+- A value that could not be decoded in the middle of a `stream` left the rest of the result unread, which failed the next command
+
 ## 2.0.0
 
 ### Asynchronous API

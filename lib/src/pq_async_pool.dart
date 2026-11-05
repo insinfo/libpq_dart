@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'pq_async.dart';
+import 'pq_values.dart' show PqInfinity, checkStatementSettings;
 
 /// A pool of [LibPqAsync] connections, each with its own isolate, so queries
 /// run in parallel. Connections open when needed, up to [maxConnections]; a lost
@@ -27,10 +28,14 @@ class LibPqAsyncPool implements PqSession {
     this.libraryPath,
     this.encoding = const Utf8Codec(allowMalformed: true),
     this.typed = true,
+    this.infinity = PqInfinity.toNull,
+    this.statementCacheSize = 0,
+    this.binary = false,
     this.sessionStatements = const [],
     this.onOpen,
   }) {
     RangeError.checkNotNegative(maxConnections - 1, 'maxConnections - 1');
+    checkStatementSettings(statementCacheSize, binary, typed);
   }
 
   final String conninfo;
@@ -57,6 +62,15 @@ class LibPqAsyncPool implements PqSession {
   final String? libraryPath;
   final Encoding encoding;
   final bool typed;
+
+  /// What a date `DateTime` cannot represent reads as.
+  final PqInfinity infinity;
+
+  /// The statements each connection keeps prepared; see [LibPqAsync.connect].
+  final int statementCacheSize;
+
+  /// Whether those statements return binary values; see [LibPqAsync.connect].
+  final bool binary;
 
   /// Statements each connection runs when it opens (`SET search_path...`).
   final List<String> sessionStatements;
@@ -86,6 +100,9 @@ class LibPqAsyncPool implements PqSession {
         libraryPath: libraryPath,
         encoding: encoding,
         typed: typed,
+        infinity: infinity,
+        statementCacheSize: statementCacheSize,
+        binary: binary,
         sessionStatements: sessionStatements,
         queryTimeout: queryTimeout);
     final setup = onOpen;

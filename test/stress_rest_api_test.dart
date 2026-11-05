@@ -21,6 +21,9 @@ import 'test_config.dart';
 int _env(String name, int fallback) =>
     int.tryParse(Platform.environment[name] ?? '') ?? fallback;
 
+/// Runs with prepared statements and the binary format.
+final bool _binary = Platform.environment['LIBPQ_STRESS_BINARY'] == '1';
+
 const _appName = 'libpq_stress';
 
 class _ServerStart {
@@ -37,6 +40,8 @@ Future<void> _serverMain(_ServerStart start) async {
       maxConnections: start.poolSize,
       acquireTimeout: const Duration(seconds: 60),
       queryTimeout: const Duration(seconds: 60),
+      statementCacheSize: _binary ? 64 : 0,
+      binary: _binary,
       sessionStatements: ["SET application_name TO '$_appName'"]);
   final http = await HttpServer.bind(InternetAddress.loopbackIPv4, start.port,
       shared: true);

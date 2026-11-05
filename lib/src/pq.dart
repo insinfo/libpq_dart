@@ -11,6 +11,7 @@ import 'package:libpq_dart/src/pq_exception.dart';
 import 'library_loader.dart';
 import 'native_params.dart';
 import 'pq_async.dart' show PqNotification;
+import 'pq_values.dart' show PqInfinity;
 import 'result.dart';
 
 /// A synchronous libpq connection.
@@ -33,6 +34,10 @@ class LibPq implements IDisposable {
   /// default is Utf8Codec(allowMalformed: true)
   Encoding encoding;
 
+  /// What a date `DateTime` cannot represent reads as, in `PqResult.getTyped`
+  /// and `PqResult.toColumnMaps`.
+  PqInfinity infinity;
+
   int get protocol {
     return _protocol;
   }
@@ -45,7 +50,10 @@ class LibPq implements IDisposable {
   /// `postgresql://` URI). Opens libpq from [dynamicLibrary], [dllPath], the
   /// `LIBPQ_PATH` environment variable or the system's library search.
   LibPq(String info,
-      {DynamicLibrary? dynamicLibrary, String? dllPath, Encoding? encoding})
+      {DynamicLibrary? dynamicLibrary,
+      String? dllPath,
+      Encoding? encoding,
+      this.infinity = PqInfinity.toNull})
       : encoding = encoding ?? const Utf8Codec(allowMalformed: true) {
     pq = LibpqBindings(dynamicLibrary ?? openLibpq(dllPath));
     conn = ffi.using(

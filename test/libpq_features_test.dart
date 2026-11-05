@@ -63,12 +63,80 @@ void main() {
       }
     });
 
-    test('a date DateTime cannot represent stays the text, without an error',
+    test('a date DateTime cannot represent is null, as in the other drivers',
         () async {
-      expect(await one("'infinity'::date"), 'infinity');
-      expect(await one("'-infinity'::timestamp"), '-infinity');
-      expect(await one("'infinity'::timestamptz"), 'infinity');
-      expect(await one("'0044-03-15 BC'::date"), '0044-03-15 BC');
+      for (final value in [
+        "'infinity'::date",
+        "'-infinity'::date",
+        "'infinity'::timestamp",
+        "'-infinity'::timestamp",
+        "'infinity'::timestamptz",
+        "'5874897-12-31'::date",
+      ]) {
+        expect(await one(value), isNull, reason: value);
+      }
+      expect(await one("array['infinity'::date, '2024-03-01'::date]"),
+          [null, DateTime.utc(2024, 3, 1)]);
+    });
+
+    test('BC dates have the astronomical year, as in the other drivers',
+        () async {
+      expect(await one("'0044-03-15 BC'::date"), DateTime.utc(-43, 3, 15));
+      expect(await one("'0044-03-15 12:00:00 BC'::timestamp"),
+          DateTime.utc(-43, 3, 15, 12));
+      expect(await one("'0001-01-01 BC'::date"), DateTime.utc(0, 1, 1));
+    });
+
+    test('PqInfinity.text keeps the server text', () async {
+      final other =
+          await LibPqAsync.connect(conninfo, infinity: PqInfinity.text);
+      addTearDown(other.close);
+      final r = await other.execute("select 'infinity'::date as a, "
+          "'-infinity'::timestamp as b, '2024-03-01'::date as c");
+      expect(
+          r.rows.single, ['infinity', '-infinity', DateTime.utc(2024, 3, 1)]);
+    });
+
+    test('PqInfinity.exception fails the command, and the connection goes on',
+        () async {
+      final other =
+          await LibPqAsync.connect(conninfo, infinity: PqInfinity.exception);
+      addTearDown(other.close);
+      await expectLater(
+          other.execute("select 'infinity'::date as v"),
+          throwsA(isA<LibPqException>()
+              .having((e) => e.sqlState, 'sqlState', '22008')));
+      await expectLater(
+          other
+              .stream("select 'infinity'::date as v from generate_series(1, 5)")
+              .toList(),
+          throwsA(isA<LibPqException>()
+              .having((e) => e.sqlState, 'sqlState', '22008')));
+      expect((await other.execute('select 1 as v')).first['v'], 1);
+      expect((await other.execute("select '2024-03-01'::date as v")).first['v'],
+          DateTime.utc(2024, 3, 1));
+    });
+
+    test('a pool takes the setting', () async {
+      final pool = LibPqAsyncPool(conninfo, infinity: PqInfinity.text);
+      addTearDown(pool.close);
+      expect((await pool.execute("select 'infinity'::date as v")).first['v'],
+          'infinity');
+    });
+
+    test('the synchronous API follows the same rule', () {
+      final pq = LibPq(conninfo);
+      addTearDown(pq.dispose);
+      final result = pq.exec("select 'infinity'::date as v");
+      addTearDown(result.dispose);
+      expect(result.getTyped(0, 0), isNull);
+      expect(result.toColumnMaps().single, {'v': null});
+      expect(result.getValue(0, 0), 'infinity');
+      final text = LibPq(conninfo, infinity: PqInfinity.text);
+      addTearDown(text.dispose);
+      final other = text.exec("select 'infinity'::date as v");
+      addTearDown(other.dispose);
+      expect(other.getTyped(0, 0), 'infinity');
     });
 
     test('a DateStyle other than ISO is corrected when connecting', () async {

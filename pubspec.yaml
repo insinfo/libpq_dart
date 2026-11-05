@@ -1,5 +1,5 @@
 name: libpq_dart
-version: 2.0.0
+version: 2.1.0
 description: >-
   PostgreSQL client for Dart over libpq: FFI bindings, a synchronous API, and an
   asynchronous API and pool that never block the event loop.

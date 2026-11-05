@@ -159,8 +159,8 @@ class PqResult implements IDisposable {
   /// The value decoded by its type (see `decodePgValue`); `null` for SQL NULL.
   Object? getTyped(int row, int column) {
     if (isNull(row, column)) return null;
-    return decodePgValue(
-        columnType(column), _nativeBytes(row, column, null), psql.encoding);
+    return decodePgValue(columnType(column), _nativeBytes(row, column, null),
+        psql.encoding, psql.infinity);
   }
 
   /// The rows as maps of column name to value decoded by its type, as the other

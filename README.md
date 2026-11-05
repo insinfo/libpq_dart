@@ -15,7 +15,7 @@ PostgreSQL client for Dart over [libpq](https://www.postgresql.org/docs/current/
 
 ```yaml
 dependencies:
-  libpq_dart: ^2.0.0
+  libpq_dart: ^2.1.0
 ```
 
 The package does not ship the library: libpq must be installed.
@@ -69,7 +69,7 @@ libpq blocks the thread that calls it, and Dart has no way to watch libpq's sock
 | arrays of these and of text types | `List<T?>` |
 | everything else (`inet`, `interval`, `time`, ranges, enums...) | `String`, the server's text |
 
-SQL NULL is `null`. A date `DateTime` cannot represent (`infinity`, BC) stays the server's text. With `typed: false` every value is the server's text.
+SQL NULL is `null`. A date `DateTime` cannot represent (`infinity`, or a year past its range) is `null` too, as in the other PostgreSQL drivers; `infinity: PqInfinity.text` gives the server's text and `PqInfinity.exception` fails the command. BC dates have the astronomical year: 44 BC is the year -43. With `typed: false` every value is the server's text.
 
 ```dart
 final r = await db.execute('select 1 as a, null as b');
@@ -179,6 +179,38 @@ libpq has to be asked: while a connection has listeners, its isolate checks ever
 
 `db.notifications` has every notification of the connection, for a `LISTEN` you run yourself, and `db.notices` has the server's notices and warnings.
 
+### Prepared statements and the binary format
+
+Both are off by default, and work on `LibPqAsync` and `LibPqAsyncPool`:
+
+```dart
+final db = await LibPqAsync.connect(conninfo,
+    statementCacheSize: 256, // statements kept prepared, per connection
+    binary: true); // needs a statementCacheSize
+```
+
+`statementCacheSize` prepares each `select`, `insert`, `update`, `delete`, `with`, `values`, `table` or `merge` the first time it runs and reuses it, so the server does not parse it again. The first run costs one more round trip, and two with `binary`; the least recently used statement leaves when the cache is full. So it pays for statements that repeat with parameters, not for SQL built with literals. A script with several statements is not prepared, and runs whole.
+
+`binary` asks for the values in binary. They are the same values as in text, which the tests compare type by type. A prepared statement tells its column types before it runs, so one with a column this driver does not read in binary (`inet`, `interval`, `float4`, an enum...) or the server cannot send that way (`aclitem`) stays in text, with no error. `PqAsyncResult.binary` tells which one a result used.
+
+Median on a local server, no TLS, compiled to AOT, 10,000 rows per query:
+
+| | text | `statementCacheSize` | with `binary` |
+| --- | --- | --- | --- |
+| Queries with a parameter, per second | 9,757 | 12,319 | 12,449 |
+| Rows per second: int, text, float8 | 858,762 | 890,263 | 951,149 |
+| Rows per second: timestamptz, date, numeric, bytea, int4[], uuid | 130,851 | 139,416 | 141,185 |
+| Rows per second: int, text, float8, on 8 connections | 2,058,972 | 2,120,666 | 2,244,648 |
+
+The gain is smaller when most of the time is the network or the query itself.
+
+When it does not fit:
+
+- A pooler in transaction mode, like PgBouncer, can give each transaction another server connection, which does not have the statement.
+- A statement whose result columns changed (`ALTER TABLE`), or that the server lost (`DEALLOCATE ALL`, `DISCARD ALL`), is prepared and run again. Inside a transaction it cannot be, as the server has already aborted it: the transaction fails with SQLSTATE `0A000` or `26000`, and the next attempt works.
+
+`LibPq`, the synchronous API, has neither; `LibpqBindings` has `PQprepare` and `PQexecPrepared`.
+
 ### Timeouts and cancelling
 
 ```dart
@@ -285,10 +317,6 @@ libpq's defaults are not the safest, and they apply here:
 
 Isolates cannot interrupt a blocking call: if the network dies without closing the connection, the command waits until the operating system gives up. libpq's `tcp_user_timeout` and `keepalives_*` settings bound that; your isolate is not affected, and `close()` still returns.
 
-## Not supported
-
-The binary result format is not used: values come as text and are decoded. There is no statement cache: each parameterized query is parsed by the server, unlike drivers that prepare statements.
-
 ## Development
 
 The tests need a PostgreSQL server:
@@ -299,6 +327,6 @@ set LIBPQ_TEST_CONNINFO=host=localhost dbname=test user=dart password=dart sslmo
 dart test --concurrency 1
 ```
 
-`test/stress_rest_api_test.dart` is a REST API under load: several server isolates sharing a port, each with its pool, and clients sending requests at once. It checks for replies to the wrong request, lost updates, rollbacks that saved something and connections left open. It is small by default; `LIBPQ_STRESS_SERVERS`, `LIBPQ_STRESS_CLIENTS`, `LIBPQ_STRESS_REQUESTS`, `LIBPQ_STRESS_IN_FLIGHT` and `LIBPQ_STRESS_POOL` make it heavier.
+`test/stress_rest_api_test.dart` is a REST API under load: several server isolates sharing a port, each with its pool, and clients sending requests at once. It checks for replies to the wrong request, lost updates, rollbacks that saved something and connections left open. It is small by default; `LIBPQ_STRESS_SERVERS`, `LIBPQ_STRESS_CLIENTS`, `LIBPQ_STRESS_REQUESTS`, `LIBPQ_STRESS_IN_FLIGHT` and `LIBPQ_STRESS_POOL` make it heavier, and `LIBPQ_STRESS_BINARY=1` runs it with prepared statements and the binary format.
 
 The CI runs them on PostgreSQL 14 to 18 on Linux, and on Windows. To regenerate the bindings: `dart run ffigen`.
